@@ -281,7 +281,8 @@ apiRouter.post('/config/upload', async (req, res) => {
     logger.info('init.json uploaded successfully');
     res.json({
       success: true,
-      message: 'Configuration saved. Please restart the agent to apply changes.',
+      message: 'Configuration saved.',
+      needsRestart: true,
     });
   } catch (error) {
     logger.error('Config upload failed:', error);
@@ -290,6 +291,19 @@ apiRouter.post('/config/upload', async (req, res) => {
       error: error instanceof Error ? error.message : 'Upload failed',
     });
   }
+});
+
+// ============== RESTART ENDPOINT ==============
+
+apiRouter.post('/restart', (req, res) => {
+  logger.info('Restart requested - shutting down process...');
+  res.json({ success: true, message: 'Restarting...' });
+
+  // Give time for response to be sent, then exit
+  // Docker with restart policy will restart the container
+  setTimeout(() => {
+    process.exit(0);
+  }, 500);
 });
 
 // ============== GENERIC STORAGE ==============

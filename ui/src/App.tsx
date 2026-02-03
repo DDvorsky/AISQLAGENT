@@ -30,7 +30,50 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{ success?: boolean; message?: string } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Wait for server to come back online after restart
+  const waitForServer = async (maxAttempts = 30): Promise<boolean> => {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const res = await fetch('/api/status');
+        if (res.ok) {
+          return true;
+        }
+      } catch {
+        // Server not ready yet
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return false;
+  };
+
+  // Trigger restart and wait for server to come back
+  const triggerRestart = async () => {
+    setRestarting(true);
+    try {
+      await fetch('/api/restart', { method: 'POST' });
+    } catch {
+      // Expected - server will disconnect
+    }
+
+    // Wait a bit for the server to go down
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Wait for server to come back
+    const isBack = await waitForServer();
+    if (isBack) {
+      // Reload the page to show new config
+      window.location.reload();
+    } else {
+      setRestarting(false);
+      setUploadStatus({
+        success: false,
+        message: 'Server did not restart properly. Please restart manually: docker restart aisqlagent',
+      });
+    }
+  };
 
   useEffect(() => {
     loadInitialData();
@@ -105,22 +148,44 @@ function App() {
       const result = await response.json();
 
       if (result.success) {
-        setUploadStatus({ success: true, message: result.message });
+        setUploading(false);
+        // Automatically trigger restart
+        await triggerRestart();
       } else {
         setUploadStatus({ success: false, message: result.error });
+        setUploading(false);
       }
     } catch (error) {
       setUploadStatus({
         success: false,
         message: error instanceof SyntaxError ? 'Invalid JSON file' : 'Upload failed',
       });
-    } finally {
       setUploading(false);
+    } finally {
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
     }
   };
+
+  // Show restarting screen
+  if (restarting) {
+    return (
+      <div className="container">
+        <div className="header">
+          <h1>AISQLAGENT</h1>
+          <p>Remote Probe for AISQLWatch</p>
+        </div>
+        <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
+          <div className="spinner" style={{ margin: '0 auto 1.5rem' }}></div>
+          <h2 style={{ marginBottom: '0.5rem' }}>Restarting with new configuration...</h2>
+          <p style={{ color: 'var(--text-muted)' }}>
+            Please wait while the agent restarts.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // Check if init.json is loaded
   if (!serverConfig?.serverUrl) {
@@ -166,15 +231,6 @@ function App() {
               style={{ marginTop: '1rem' }}
             >
               {uploadStatus.message}
-              {uploadStatus.success && (
-                <p style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
-                  Restart the Docker container to apply changes:
-                  <br />
-                  <code style={{ display: 'block', marginTop: '0.5rem' }}>
-                    docker restart aisqlagent
-                  </code>
-                </p>
-              )}
             </div>
           )}
 
