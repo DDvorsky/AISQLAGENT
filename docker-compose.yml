@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  aisqlagent:
+    build: .
+    image: aisqlagent:latest
+    container_name: aisqlagent
+    ports:
+      - "3000:3000"
+    volumes:
+      # Configuration file from AISQLWatch server (required)
+      - ./init.json:/app/config/init.json:ro
+      # Source code project directory (readonly)
+      # CHANGE THIS to your actual project path
+      - /path/to/your/project:/project:ro
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - CONFIG_PATH=/app/config/init.json
+      - PROJECT_PATH=/project
+    # For accessing SQL Server on host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
