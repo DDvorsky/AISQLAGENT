@@ -2,13 +2,22 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies
+# Install backend dependencies
 COPY package*.json ./
 RUN npm ci
 
-# Copy source and build
+# Install UI dependencies
+COPY ui/package*.json ./ui/
+RUN cd ui && npm ci
+
+# Copy all source
 COPY . .
-RUN npm run build
+
+# Build backend (TypeScript) - skip the ui build in npm script
+RUN npx tsc
+
+# Build UI separately
+RUN cd ui && npm run build
 
 # Production image
 FROM node:20-alpine
@@ -19,8 +28,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --production
 
-# Copy built files
+# Copy built backend
 COPY --from=builder /app/dist ./dist
+
+# Copy built UI
 COPY --from=builder /app/ui/dist ./ui/dist
 
 # Create config directory
