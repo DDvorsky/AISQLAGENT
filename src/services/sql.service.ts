@@ -71,8 +71,9 @@ export class SqlService {
 
     try {
       const request = this.pool!.request();
+      // Set query timeout via the request's internal timeout property
       if (timeout) {
-        request.timeout = timeout;
+        (request as unknown as { _timeout: number })._timeout = timeout;
       }
 
       const result = await request.query(query);

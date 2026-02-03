@@ -75,7 +75,7 @@ export class WebSocketService {
       throw new Error(`Authentication failed: ${response.status}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { access_token: string };
     this.jwtToken = data.access_token;
     logger.info('Authenticated with Keycloak');
   }

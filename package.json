@@ -1,6 +1,7 @@
 {
   "name": "aisqlagent",
   "version": "1.0.0",
+  "type": "module",
   "description": "Remote probe/agent for AISQLWatch - executes SQL commands and provides file access",
   "main": "dist/index.js",
   "scripts": {
