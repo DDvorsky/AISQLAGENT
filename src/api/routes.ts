@@ -259,6 +259,39 @@ apiRouter.post('/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
+// ============== INIT.JSON UPLOAD ==============
+
+apiRouter.post('/config/upload', async (req, res) => {
+  try {
+    const initJson = req.body;
+
+    // Validate required fields
+    if (!initJson.clientId || !initJson.clientSecret || !initJson.serverUrl) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid init.json - missing required fields (clientId, clientSecret, serverUrl)',
+      });
+    }
+
+    // Save to config path
+    const configPath = path.resolve(process.env.CONFIG_PATH || './config/init.json');
+    await ensureConfigDir();
+    await fs.writeFile(configPath, JSON.stringify(initJson, null, 2));
+
+    logger.info('init.json uploaded successfully');
+    res.json({
+      success: true,
+      message: 'Configuration saved. Please restart the agent to apply changes.',
+    });
+  } catch (error) {
+    logger.error('Config upload failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Upload failed',
+    });
+  }
+});
+
 // ============== GENERIC STORAGE ==============
 
 apiRouter.get('/storage/:key', async (req, res) => {

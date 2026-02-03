@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ServerConfigCard } from './components/ServerConfigCard';
 import { SqlConfigCard } from './components/SqlConfigCard';
 import { StatusCard } from './components/StatusCard';
@@ -28,6 +28,9 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'status' | 'sql' | 'auth'>('status');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<{ success?: boolean; message?: string } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadInitialData();
@@ -82,6 +85,43 @@ function App() {
     );
   }
 
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setUploadStatus(null);
+
+    try {
+      const text = await file.text();
+      const json = JSON.parse(text);
+
+      const response = await fetch('/api/config/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(json),
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        setUploadStatus({ success: true, message: result.message });
+      } else {
+        setUploadStatus({ success: false, message: result.error });
+      }
+    } catch (error) {
+      setUploadStatus({
+        success: false,
+        message: error instanceof SyntaxError ? 'Invalid JSON file' : 'Upload failed',
+      });
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   // Check if init.json is loaded
   if (!serverConfig?.serverUrl) {
     return (
@@ -91,12 +131,61 @@ function App() {
           <p>Remote Probe for AISQLWatch</p>
         </div>
         <div className="card">
-          <div className="alert alert-error">
-            <strong>Configuration Missing</strong>
-            <p style={{ marginTop: '0.5rem' }}>
-              No init.json found. Please download the configuration file from AISQLWatch
-              and mount it to <code>/app/config/init.json</code>
+          <div className="card-header">
+            <h2 className="card-title">Configuration Required</h2>
+          </div>
+
+          <p style={{ marginBottom: '1rem', color: 'var(--text-muted)' }}>
+            Upload the <code>init.json</code> file downloaded from AISQLWatch to configure this agent.
+          </p>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleFileUpload}
+            style={{ display: 'none' }}
+            id="init-json-upload"
+          />
+
+          <label
+            htmlFor="init-json-upload"
+            className="btn btn-primary"
+            style={{
+              display: 'inline-block',
+              cursor: uploading ? 'wait' : 'pointer',
+              opacity: uploading ? 0.7 : 1,
+            }}
+          >
+            {uploading ? 'Uploading...' : 'Upload init.json'}
+          </label>
+
+          {uploadStatus && (
+            <div
+              className={`alert ${uploadStatus.success ? 'alert-success' : 'alert-error'}`}
+              style={{ marginTop: '1rem' }}
+            >
+              {uploadStatus.message}
+              {uploadStatus.success && (
+                <p style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
+                  Restart the Docker container to apply changes:
+                  <br />
+                  <code style={{ display: 'block', marginTop: '0.5rem' }}>
+                    docker restart aisqlagent
+                  </code>
+                </p>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
+            <strong style={{ fontSize: '0.875rem' }}>Alternative: Mount via Docker</strong>
+            <p style={{ marginTop: '0.5rem', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+              You can also mount the init.json file when starting the container:
             </p>
+            <code style={{ display: 'block', marginTop: '0.5rem', fontSize: '0.75rem', wordBreak: 'break-all' }}>
+              docker run -v /path/to/init.json:/app/config/init.json aisqlagent
+            </code>
           </div>
         </div>
       </div>
