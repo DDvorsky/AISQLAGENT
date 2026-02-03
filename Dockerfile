@@ -34,12 +34,13 @@ COPY --from=builder /app/dist ./dist
 # Copy built UI
 COPY --from=builder /app/ui/dist ./ui/dist
 
-# Create config directory
-RUN mkdir -p /app/config
-
 # Non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 -G nodejs
+
+# Create config directory with correct ownership
+RUN mkdir -p /app/config && chown -R nodejs:nodejs /app/config
+
 USER nodejs
 
 EXPOSE 3000
