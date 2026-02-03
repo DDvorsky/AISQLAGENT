@@ -15,6 +15,10 @@ export class WebSocketService {
   private fileService: FileService;
   private reconnectAttempts = 0;
   private jwtToken: string | null = null;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+
+  // Callback for connection status changes
+  public onConnectionChange: ((connected: boolean) => void) | null = null;
 
   constructor(config: AppConfig, sqlService: SqlService, fileService: FileService) {
     this.config = config;
@@ -82,6 +86,7 @@ export class WebSocketService {
     this.socket.on('connect', () => {
       logger.info('Connected to AISQLWatch server');
       this.reconnectAttempts = 0;
+      this.onConnectionChange?.(true);
       this.registerProbe();
       this.startHeartbeat();
       this.syncProjectData();
@@ -89,6 +94,8 @@ export class WebSocketService {
 
     this.socket.on('disconnect', (reason) => {
       logger.warn(`Disconnected: ${reason}`);
+      this.onConnectionChange?.(false);
+      this.stopHeartbeat();
     });
 
     this.socket.on('error', (error) => {
@@ -223,7 +230,8 @@ export class WebSocketService {
   }
 
   private startHeartbeat(): void {
-    setInterval(() => {
+    this.stopHeartbeat();
+    this.heartbeatInterval = setInterval(() => {
       if (this.socket?.connected) {
         const message: Message = {
           id: uuidv4(),
@@ -235,6 +243,13 @@ export class WebSocketService {
         this.socket.emit('message', message);
       }
     }, 30000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
   }
 
   private async syncProjectData(): Promise<void> {
@@ -276,7 +291,13 @@ export class WebSocketService {
   }
 
   disconnect(): void {
+    this.stopHeartbeat();
+    this.onConnectionChange?.(false);
     this.socket?.disconnect();
     this.socket = null;
+  }
+
+  isConnected(): boolean {
+    return this.socket?.connected ?? false;
   }
 }

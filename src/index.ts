@@ -1,12 +1,16 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { WebSocketService } from './services/websocket.service.js';
 import { SqlService } from './services/sql.service.js';
 import { FileService } from './services/file.service.js';
 import { logger } from './utils/logger.js';
-import { apiRouter } from './api/routes.js';
+import { apiRouter, initializeRoutes, setWsConnected, loadSavedSqlConfig } from './api/routes.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -23,33 +27,59 @@ app.get('/health', (req, res) => {
 app.use('/api', apiRouter);
 
 // Serve static UI files
-app.use(express.static(path.join(__dirname, '../ui/dist')));
+const uiPath = path.join(__dirname, '../ui/dist');
+app.use(express.static(uiPath));
 
 // SPA fallback
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../ui/dist/index.html'));
+  res.sendFile(path.join(uiPath, 'index.html'));
 });
 
 // Initialize services
 const sqlService = new SqlService();
 const fileService = new FileService(config.projectPath);
+
+// Initialize routes with services
+initializeRoutes(sqlService);
+
+// WebSocket service with connection status callback
 const wsService = new WebSocketService(config, sqlService, fileService);
+wsService.onConnectionChange = setWsConnected;
 
 // Start server
-app.listen(config.port, () => {
-  logger.info(`AISQLAGENT running on port ${config.port}`);
-  logger.info(`UI available at http://localhost:${config.port}`);
+async function start() {
+  // Load saved SQL configuration
+  await loadSavedSqlConfig();
 
-  // Connect to AISQLWatch server if configured
-  if (config.isConfigured) {
-    wsService.connect();
-  } else {
-    logger.info('Waiting for initial configuration...');
-  }
+  app.listen(config.port, () => {
+    logger.info(`AISQLAGENT running on port ${config.port}`);
+    logger.info(`UI available at http://localhost:${config.port}`);
+    logger.info(`Project path: ${config.projectPath}`);
+
+    // Connect to AISQLWatch server if configured
+    if (config.isConfigured) {
+      logger.info('Connecting to AISQLWatch server...');
+      wsService.connect();
+    } else {
+      logger.warn('Server not configured - waiting for init.json');
+    }
+  });
+}
+
+start().catch((error) => {
+  logger.error('Failed to start:', error);
+  process.exit(1);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
+  logger.info('Shutting down...');
+  wsService.disconnect();
+  await sqlService.disconnect();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
   logger.info('Shutting down...');
   wsService.disconnect();
   await sqlService.disconnect();
