@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aisqlagent-config
+  labels:
+    app: aisqlagent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aisqlagent
+  labels:
+    app: aisqlagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aisqlagent
+  template:
+    metadata:
+      labels:
+        app: aisqlagent
+    spec:
+      containers:
+      - name: agent
+        image: registry.danyverse.com/aisqlwatch/agent:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: CONFIG_PATH
+          value: "/app/config/init.json"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/status
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/status
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: aisqlagent-config
+      imagePullSecrets:
+      - name: registry-creds
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aisqlagent
+  labels:
+    app: aisqlagent
+spec:
+  selector:
+    app: aisqlagent
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: ClusterIP

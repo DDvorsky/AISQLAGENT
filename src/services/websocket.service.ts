@@ -1,30 +1,53 @@
 import WebSocket from 'ws';
 import https from 'https';
+import fs from 'fs/promises';
+import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { AppConfig, Message, SqlExecutePayload, FileReadPayload, FileListPayload, FileSearchPayload } from '../types/index.js';
+import { AppConfig, Message, SqlExecutePayload, FileReadPayload, FileListPayload, FileSearchPayload, CatalogSyncPayload } from '../types/index.js';
 import { SqlService } from './sql.service.js';
 import { FileService } from './file.service.js';
+import { AllowlistService, AllowlistValidationError } from './allowlist.service.js';
 import { logger } from '../utils/logger.js';
+
+// Path for persisting auth config received from server
+const AUTH_CONFIG_PATH = path.join(process.cwd(), 'config', 'auth-config.json');
 
 const RECONNECT_INITIAL_DELAY = 1000;
 const RECONNECT_MAX_DELAY = 30000;
+
+// Pending auth verification requests
+interface PendingRequest {
+  resolve: (value: { success: boolean; error?: string }) => void;
+  reject: (error: Error) => void;
+}
+
+// Catalog refresh interval (50 minutes - before 60-min expiration)
+const CATALOG_REFRESH_INTERVAL = 50 * 60 * 1000;
 
 export class WebSocketService {
   private socket: WebSocket | null = null;
   private config: AppConfig;
   private sqlService: SqlService;
   private fileService: FileService;
+  private allowlistService: AllowlistService;
   private reconnectAttempts = 0;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private catalogRefreshInterval: NodeJS.Timeout | null = null;
   private _isConnected = false;
+  private pendingRequests = new Map<string, PendingRequest>();
+  private _authRequired = false;
 
   // Callback for connection status changes
   public onConnectionChange: ((connected: boolean) => void) | null = null;
+  // Callback for auth status changes
+  public onAuthStatusChange: ((authRequired: boolean) => void) | null = null;
 
   constructor(config: AppConfig, sqlService: SqlService, fileService: FileService) {
     this.config = config;
     this.sqlService = sqlService;
     this.fileService = fileService;
+    // Initialize allowlist service with CA certificate (for signature verification)
+    this.allowlistService = new AllowlistService(config.caCertificate || '');
   }
 
   async connect(): Promise<void> {
@@ -165,12 +188,40 @@ export class WebSocketService {
   private async handleMessage(message: Message): Promise<void> {
     logger.debug(`Received: ${message.type}/${message.action}`);
 
+    // Handle responses to our requests (like auth.verify, allowlist.refresh)
+    if (message.type === 'response' && message.id) {
+      // Handle allowlist refresh response
+      if (message.action === 'allowlist.refresh.response') {
+        const payload = message.payload as CatalogSyncPayload | undefined;
+        if (payload?.catalog) {
+          this.handleAllowlistSync(payload);
+        }
+        return;
+      }
+
+      const pending = this.pendingRequests.get(message.id);
+      if (pending) {
+        this.pendingRequests.delete(message.id);
+        // Auth responses have success/error at root level, not in payload
+        const responseMsg = message as unknown as { success?: boolean; error?: string };
+        pending.resolve({
+          success: responseMsg.success ?? false,
+          error: responseMsg.error,
+        });
+      }
+      return;
+    }
+
     // Handle events from server (no response needed)
     if (message.type === 'event') {
       switch (message.action) {
         case 'config.sync':
-          // Server sends config like passwordHash on connection
-          this.handleConfigSync(message.payload as { passwordHash?: string });
+          // Server sends authRequired flag on connection
+          this.handleConfigSync(message.payload as { authRequired?: boolean });
+          break;
+        case 'allowlist.sync':
+          // Server sends signed query catalog for validation
+          this.handleAllowlistSync(message.payload as CatalogSyncPayload);
           break;
         default:
           logger.debug(`Unknown event: ${message.action}`);
@@ -215,23 +266,179 @@ export class WebSocketService {
 
   /**
    * Handle config sync event from server.
-   * Updates local config with server-provided values like passwordHash.
+   * Server tells us if auth is required (password is set on server).
+   * Persists to file so auth is required on restart.
    */
-  private handleConfigSync(payload: { passwordHash?: string }): void {
-    if (payload.passwordHash) {
-      this.config.passwordHash = payload.passwordHash;
-      logger.info('Received passwordHash from server - auth enabled for local UI');
+  private async handleConfigSync(payload: { authRequired?: boolean }): Promise<void> {
+    this._authRequired = payload.authRequired ?? false;
+
+    if (this._authRequired) {
+      logger.info('Server requires authentication for agent UI');
     } else {
-      // Server has no password set - clear local auth requirement
-      this.config.passwordHash = undefined;
-      logger.info('No passwordHash from server - local UI auth disabled');
+      logger.info('Server has no password set - agent UI open access');
     }
+
+    // Notify listeners about auth status
+    this.onAuthStatusChange?.(this._authRequired);
+
+    // Persist to file for next startup
+    try {
+      await fs.mkdir(path.dirname(AUTH_CONFIG_PATH), { recursive: true });
+      await fs.writeFile(AUTH_CONFIG_PATH, JSON.stringify({ authRequired: this._authRequired }, null, 2));
+      logger.debug('Auth config persisted to file');
+    } catch (error) {
+      logger.warn('Failed to persist auth config:', error);
+    }
+  }
+
+  /**
+   * Handle allowlist sync event from server.
+   * Server sends signed query catalog for validation.
+   */
+  private handleAllowlistSync(payload: CatalogSyncPayload): void {
+    try {
+      this.allowlistService.updateCatalog(payload.catalog);
+
+      // Start catalog refresh timer (to get new catalog before expiration)
+      this.startCatalogRefresh();
+
+      logger.info(`Query catalog synced: ${Object.keys(payload.catalog.queries).length} queries approved`);
+    } catch (error) {
+      if (error instanceof AllowlistValidationError) {
+        logger.error(`Catalog validation failed: ${error.message} (${error.code})`);
+      } else {
+        logger.error('Failed to process catalog sync:', error);
+      }
+    }
+  }
+
+  /**
+   * Verify password with the server.
+   * Returns success/failure and error message if failed.
+   */
+  async verifyAuth(password: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return { success: false, error: 'Not connected to server' };
+    }
+
+    const requestId = uuidv4();
+
+    return new Promise((resolve, reject) => {
+      // Set timeout for request
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        resolve({ success: false, error: 'Authentication request timed out' });
+      }, 10000);
+
+      // Store pending request
+      this.pendingRequests.set(requestId, {
+        resolve: (result) => {
+          clearTimeout(timeout);
+          resolve(result);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+
+      // Send auth verify request
+      const message: Message = {
+        id: requestId,
+        type: 'request',
+        action: 'auth.verify',
+        payload: { password },
+        timestamp: Date.now(),
+      };
+      this.sendMessage(message);
+    });
+  }
+
+  /**
+   * Check if authentication is required (password set on server)
+   */
+  isAuthRequired(): boolean {
+    return this._authRequired;
   }
 
   private async handleSqlExecute(payload: SqlExecutePayload) {
     const startTime = Date.now();
+
     try {
-      const result = await this.sqlService.execute(payload.query, payload.timeout);
+      let queryToExecute: string;
+
+      // NEW: Template-based execution with catalog validation
+      if (payload.template) {
+        // 1. Check catalog availability
+        if (!this.allowlistService.hasCatalog()) {
+          return {
+            columns: [],
+            rows: [],
+            rowCount: 0,
+            duration: Date.now() - startTime,
+            error: 'Security: Query catalog not yet received from server',
+          };
+        }
+
+        if (this.allowlistService.isCatalogExpired()) {
+          return {
+            columns: [],
+            rows: [],
+            rowCount: 0,
+            duration: Date.now() - startTime,
+            error: 'Security: Query catalog has expired - waiting for refresh',
+          };
+        }
+
+        // 2. Validate template against catalog (throws if invalid)
+        try {
+          this.allowlistService.validateTemplate(payload.template);
+        } catch (error) {
+          if (error instanceof AllowlistValidationError) {
+            logger.warn(`Template rejected: ${error.code}`);
+            return {
+              columns: [],
+              rows: [],
+              rowCount: 0,
+              duration: Date.now() - startTime,
+              error: `Security: ${error.message}`,
+            };
+          }
+          throw error;
+        }
+
+        // 3. Substitute params into validated template
+        queryToExecute = this.allowlistService.substituteParams(
+          payload.template,
+          payload.params || {}
+        );
+
+        logger.debug(`Executing validated query for tool: ${payload.toolId}`);
+      } else if (payload.query) {
+        // LEGACY: Direct query - only allow if catalog not loaded (backward compat)
+        if (this.allowlistService.hasCatalog()) {
+          return {
+            columns: [],
+            rows: [],
+            rowCount: 0,
+            duration: Date.now() - startTime,
+            error: 'Security: Direct queries not allowed - template required',
+          };
+        }
+        queryToExecute = payload.query;
+        logger.warn('Executing direct query (no catalog validation)');
+      } else {
+        return {
+          columns: [],
+          rows: [],
+          rowCount: 0,
+          duration: Date.now() - startTime,
+          error: 'No query or template provided',
+        };
+      }
+
+      // 4. Execute the query
+      const result = await this.sqlService.execute(queryToExecute, payload.timeout);
       return {
         columns: result.columns,
         rows: result.rows,
@@ -355,6 +562,36 @@ export class WebSocketService {
     }
   }
 
+  /**
+   * Start periodic catalog refresh.
+   * Requests fresh catalog from server before expiration.
+   */
+  private startCatalogRefresh(): void {
+    this.stopCatalogRefresh();
+
+    this.catalogRefreshInterval = setInterval(() => {
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        logger.info('Requesting catalog refresh...');
+        this.sendMessage({
+          id: uuidv4(),
+          type: 'request',
+          action: 'allowlist.refresh',
+          payload: {},
+          timestamp: Date.now(),
+        });
+      }
+    }, CATALOG_REFRESH_INTERVAL);
+
+    logger.debug(`Catalog refresh scheduled every ${CATALOG_REFRESH_INTERVAL / 60000} minutes`);
+  }
+
+  private stopCatalogRefresh(): void {
+    if (this.catalogRefreshInterval) {
+      clearInterval(this.catalogRefreshInterval);
+      this.catalogRefreshInterval = null;
+    }
+  }
+
   private async syncProjectData(): Promise<void> {
     // Skip sync if no project path configured
     if (!this.config.projectPath) {
@@ -401,6 +638,7 @@ export class WebSocketService {
 
   disconnect(): void {
     this.stopHeartbeat();
+    this.stopCatalogRefresh();
     this._isConnected = false;
     this.onConnectionChange?.(false);
     this.socket?.close();

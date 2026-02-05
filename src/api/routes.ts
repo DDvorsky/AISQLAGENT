@@ -80,6 +80,25 @@ apiRouter.get('/config', (req, res) => {
   });
 });
 
+// Auth middleware for protecting routes
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const authMiddleware = (req: any, res: any, next: () => void) => {
+  // Check if auth is required (from server via WebSocket)
+  const authRequired = wsService?.isAuthRequired() ?? config.authRequired;
+
+  // Skip auth if no password is configured on server
+  if (!authRequired) {
+    return next();
+  }
+
+  const token = getTokenFromRequest(req);
+  if (!validateSession(token)) {
+    return res.status(401).json({ error: 'Unauthorized - please login' });
+  }
+
+  next();
+};
+
 // ============== SQL ENDPOINTS (Protected) ==============
 
 apiRouter.get('/sql/config', authMiddleware, async (req, res) => {
@@ -182,16 +201,18 @@ function getTokenFromRequest(req: { headers: { authorization?: string } }): stri
 apiRouter.get('/auth/status', (req, res) => {
   const token = getTokenFromRequest(req);
   const isAuthenticated = validateSession(token);
-  const requiresAuth = !!config.passwordHash;
+  // Check if auth is required (from server via WebSocket, or from persisted config)
+  const requiresAuth = wsService?.isAuthRequired() ?? config.authRequired;
 
   res.json({
     requiresAuth,
     authenticated: isAuthenticated,
+    wsConnected: wsService?.isConnected() ?? false,
   });
 });
 
-// Login - verify password against hash from init.json
-apiRouter.post('/auth/login', (req, res) => {
+// Login - verify password via WebSocket with server
+apiRouter.post('/auth/login', async (req, res) => {
   try {
     const { password } = req.body;
 
@@ -199,20 +220,23 @@ apiRouter.post('/auth/login', (req, res) => {
       return res.status(400).json({ success: false, error: 'Password required' });
     }
 
-    // Check if auth is configured
-    if (!config.passwordHash) {
-      return res.status(400).json({ success: false, error: 'Authentication not configured' });
+    // Check if WebSocket is connected
+    if (!wsService || !wsService.isConnected()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Not connected to server. Please wait for connection.',
+      });
     }
 
-    // Hash the input password with SHA256 (same as server)
-    const inputHash = crypto.createHash('sha256').update(password).digest('hex');
+    // Verify password with server via WebSocket
+    const result = await wsService.verifyAuth(password);
 
-    if (inputHash !== config.passwordHash) {
-      logger.warn('Login attempt with invalid password');
-      return res.status(401).json({ success: false, error: 'Invalid password' });
+    if (!result.success) {
+      logger.warn('Login attempt failed:', result.error);
+      return res.status(401).json({ success: false, error: result.error || 'Invalid password' });
     }
 
-    // Create session token
+    // Create session token (stored in memory only - closes with window)
     const token = generateToken();
     sessions.set(token, { createdAt: Date.now() });
 
@@ -237,25 +261,9 @@ apiRouter.post('/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Auth middleware for protecting routes
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const authMiddleware = (req: any, res: any, next: () => void) => {
-  // Skip auth if no password is configured (agent is open)
-  if (!config.passwordHash) {
-    return next();
-  }
-
-  const token = getTokenFromRequest(req);
-  if (!validateSession(token)) {
-    return res.status(401).json({ error: 'Unauthorized - please login' });
-  }
-
-  next();
-};
-
 // ============== INIT.JSON UPLOAD (Protected) ==============
 
-apiRouter.post('/config/upload', authMiddleware, async (req, res) => {
+apiRouter.post('/config/upload', async (req, res) => {
   try {
     const initJson = req.body;
 

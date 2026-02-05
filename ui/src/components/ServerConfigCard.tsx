@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { fetchWithAuth } from '../utils/fetchWithAuth';
 
 interface ServerConfigCardProps {
   config: {
@@ -27,7 +28,7 @@ export function ServerConfigCard({ config, onConfigChange }: ServerConfigCardPro
     setSaveResult(null);
 
     try {
-      const res = await fetch('/api/config/project-path', {
+      const res = await fetchWithAuth('/api/config/project-path', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectPath }),
@@ -38,7 +39,7 @@ export function ServerConfigCard({ config, onConfigChange }: ServerConfigCardPro
         setSaveResult({ success: true, message: 'Project path saved. Restarting...' });
         setRestarting(true);
         try {
-          await fetch('/api/restart', { method: 'POST' });
+          await fetchWithAuth('/api/restart', { method: 'POST' });
         } catch {
           // Expected - server disconnects
         }

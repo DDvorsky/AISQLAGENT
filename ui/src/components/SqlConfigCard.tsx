@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { fetchWithAuth } from '../App';
+import { fetchWithAuth } from '../utils/fetchWithAuth';
 
 interface SqlConfigCardProps {
   onConnectionChange: () => void;

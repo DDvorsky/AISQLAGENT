@@ -15,8 +15,6 @@ export interface InitConfig {
   caCertificate?: string;    // PEM-encoded CA certificate for server verification
   certExpiresAt?: string;    // ISO format expiration date
 
-  // Agent UI authentication (required)
-  passwordHash?: string;     // SHA256 hash for local UI authentication
 }
 
 export interface AppConfig extends InitConfig {
@@ -27,6 +25,9 @@ export interface AppConfig extends InitConfig {
 
   // Resolved auth mode
   authMode: 'certificate' | 'secret' | 'none';
+
+  // Auth required flag (from server via WebSocket)
+  authRequired: boolean;
 }
 
 export interface SqlConfig {

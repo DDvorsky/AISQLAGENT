@@ -3,6 +3,7 @@ import { ServerConfigCard } from './components/ServerConfigCard';
 import { SqlConfigCard } from './components/SqlConfigCard';
 import { StatusCard } from './components/StatusCard';
 import { LoginScreen } from './components/LoginScreen';
+import { fetchWithAuth } from './utils/fetchWithAuth';
 
 interface AppStatus {
   configured: boolean;
@@ -25,16 +26,6 @@ interface AuthStatus {
   requiresAuth: boolean;
   authenticated: boolean;
 }
-
-// Helper to make authenticated fetch requests
-export const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
-  const token = localStorage.getItem('authToken');
-  const headers = new Headers(options.headers);
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
-  return fetch(url, { ...options, headers });
-};
 
 function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
@@ -137,7 +128,7 @@ function App() {
 
   const handleLogout = async () => {
     await fetchWithAuth('/api/auth/logout', { method: 'POST' });
-    localStorage.removeItem('authToken');
+    sessionStorage.removeItem('authToken');
     setAuthStatus({ requiresAuth: true, authenticated: false });
   };
 

@@ -10,8 +10,29 @@ export interface Message {
 
 // Server -> Client actions
 export interface SqlExecutePayload {
-  query: string;
+  // NEW: Template-based execution (for catalog validation)
+  template?: string;              // SQL with {{placeholders}}
+  params?: Record<string, string>; // Parameter values for substitution
+  toolId?: string;                // Tool ID for logging
+
+  // LEGACY: Direct query (only when catalog disabled)
+  query?: string;
+
   timeout?: number;
+}
+
+// Query catalog (sent from server via WebSocket)
+export interface QueryCatalog {
+  version: number;
+  generated_at: string;
+  expires_at: string;
+  queries: Record<string, string>;  // toolId → hash
+  signature: string;
+}
+
+// Catalog sync event payload
+export interface CatalogSyncPayload {
+  catalog: QueryCatalog;
 }
 
 export interface FileReadPayload {

@@ -24,8 +24,8 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
       const result = await res.json();
 
       if (result.success && result.token) {
-        // Store token for authenticated requests
-        localStorage.setItem('authToken', result.token);
+        // Store token in sessionStorage (closes = logout)
+        sessionStorage.setItem('authToken', result.token);
         setPassword('');
         onLogin();
       } else {
