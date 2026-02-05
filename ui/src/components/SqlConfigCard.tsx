@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { fetchWithAuth } from '../App';
 
 interface SqlConfigCardProps {
   onConnectionChange: () => void;
@@ -36,7 +37,7 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
 
   const loadSavedConfig = async () => {
     try {
-      const res = await fetch('/api/sql/config');
+      const res = await fetchWithAuth('/api/sql/config');
       if (res.ok) {
         const data = await res.json();
         if (data.server) {
@@ -68,14 +69,14 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
 
     try {
       // First save the config
-      await fetch('/api/sql/configure', {
+      await fetchWithAuth('/api/sql/configure', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
       });
 
       // Then test
-      const res = await fetch('/api/sql/test', { method: 'POST' });
+      const res = await fetchWithAuth('/api/sql/test', { method: 'POST' });
       const result = await res.json();
       setTestResult(result);
       onConnectionChange();
@@ -94,7 +95,7 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
     setSaveResult(null);
 
     try {
-      const res = await fetch('/api/sql/configure', {
+      const res = await fetchWithAuth('/api/sql/configure', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),

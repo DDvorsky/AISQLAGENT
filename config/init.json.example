@@ -1,0 +1,9 @@
+{
+  "serverId": 1,
+  "clientId": "your-client-id-here",
+  "clientSecret": "your-client-secret-here",
+  "serverUrl": "http://192.168.1.244:8000",
+  "keycloakUrl": "https://auth.synergy-ai.space/realms/AISQLWatch",
+  "apiUrl": "http://192.168.1.244:8000/api",
+  "projectPath": ""
+}

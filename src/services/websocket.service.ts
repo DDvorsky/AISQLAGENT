@@ -1,4 +1,5 @@
-import { io, Socket } from 'socket.io-client';
+import WebSocket from 'ws';
+import https from 'https';
 import { v4 as uuidv4 } from 'uuid';
 import { AppConfig, Message, SqlExecutePayload, FileReadPayload, FileListPayload, FileSearchPayload } from '../types/index.js';
 import { SqlService } from './sql.service.js';
@@ -9,13 +10,13 @@ const RECONNECT_INITIAL_DELAY = 1000;
 const RECONNECT_MAX_DELAY = 30000;
 
 export class WebSocketService {
-  private socket: Socket | null = null;
+  private socket: WebSocket | null = null;
   private config: AppConfig;
   private sqlService: SqlService;
   private fileService: FileService;
   private reconnectAttempts = 0;
-  private jwtToken: string | null = null;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private _isConnected = false;
 
   // Callback for connection status changes
   public onConnectionChange: ((connected: boolean) => void) | null = null;
@@ -32,85 +33,152 @@ export class WebSocketService {
       return;
     }
 
-    try {
-      // Get JWT token from Keycloak
-      await this.authenticate();
+    if (this.config.authMode === 'none') {
+      logger.error('No authentication configured. Please download init.json from the server.');
+      return;
+    }
 
-      // Connect to WebSocket server
-      this.socket = io(this.config.serverUrl, {
-        auth: {
-          token: this.jwtToken,
-          clientId: this.config.clientId,
-          serverId: this.config.serverId,
-        },
-        reconnection: true,
-        reconnectionDelay: RECONNECT_INITIAL_DELAY,
-        reconnectionDelayMax: RECONNECT_MAX_DELAY,
-        reconnectionAttempts: Infinity,
+    try {
+      // Build WebSocket URL and options based on auth mode
+      const { wsUrl, wsOptions } = this.buildWebSocketConnection();
+
+      if (this.config.authMode === 'certificate') {
+        logger.info(`Connecting to ${wsUrl} (mTLS authentication)`);
+      } else {
+        logger.info(`Connecting to ${wsUrl.replace(/client_secret=[^&]+/, 'client_secret=***')} (legacy authentication)`);
+      }
+
+      this.socket = new WebSocket(wsUrl, wsOptions);
+
+      this.socket.on('open', () => {
+        logger.info(`Connected to AISQLWatch server via ${this.config.authMode} auth`);
+        this._isConnected = true;
+        this.reconnectAttempts = 0;
+        this.onConnectionChange?.(true);
+        this.registerProbe();
+        this.startHeartbeat();
+        this.syncProjectData();
       });
 
-      this.setupEventHandlers();
+      this.socket.on('message', (data: WebSocket.Data) => {
+        try {
+          const message = JSON.parse(data.toString()) as Message;
+          this.handleMessage(message);
+        } catch (error) {
+          logger.error('Failed to parse message:', error);
+        }
+      });
+
+      this.socket.on('close', (code: number, reason: Buffer) => {
+        logger.warn(`Disconnected: code=${code}, reason=${reason.toString()}`);
+        this._isConnected = false;
+        this.onConnectionChange?.(false);
+        this.stopHeartbeat();
+
+        // Reconnect unless it was an auth failure
+        if (code !== 4001) {
+          this.scheduleReconnect();
+        } else {
+          if (this.config.authMode === 'certificate') {
+            logger.error('Authentication failed - certificate may be invalid, expired, or revoked');
+          } else {
+            logger.error('Authentication failed - check client_id and client_secret');
+          }
+        }
+      });
+
+      this.socket.on('error', (error: Error) => {
+        logger.error('WebSocket error:', error);
+      });
+
     } catch (error) {
       logger.error('Connection failed:', error);
       this.scheduleReconnect();
     }
   }
 
-  private async authenticate(): Promise<void> {
-    const tokenUrl = `${this.config.keycloakUrl}/protocol/openid-connect/token`;
+  /**
+   * Build WebSocket connection URL and options based on authentication mode
+   */
+  private buildWebSocketConnection(): { wsUrl: string; wsOptions: WebSocket.ClientOptions } {
+    // Convert HTTP URL to WebSocket URL
+    let baseUrl = this.config.serverUrl;
 
-    const response = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: this.config.clientId,
-        client_secret: this.config.clientSecret,
-      }),
-    });
+    // Handle protocol conversion
+    // When using certificate auth, always use secure WebSocket (wss://)
+    const forceSecure = this.config.authMode === 'certificate';
 
-    if (!response.ok) {
-      throw new Error(`Authentication failed: ${response.status}`);
+    if (baseUrl.startsWith('https://')) {
+      baseUrl = baseUrl.replace('https://', 'wss://');
+    } else if (baseUrl.startsWith('http://')) {
+      baseUrl = baseUrl.replace('http://', forceSecure ? 'wss://' : 'ws://');
     }
 
-    const data = await response.json() as { access_token: string };
-    this.jwtToken = data.access_token;
-    logger.info('Authenticated with Keycloak');
-  }
+    // Remove trailing slash
+    baseUrl = baseUrl.replace(/\/$/, '');
 
-  private setupEventHandlers(): void {
-    if (!this.socket) return;
+    // Add /ws/probe path if not present
+    if (!baseUrl.includes('/ws/probe')) {
+      baseUrl = `${baseUrl}/ws/probe`;
+    }
 
-    this.socket.on('connect', () => {
-      logger.info('Connected to AISQLWatch server');
-      this.reconnectAttempts = 0;
-      this.onConnectionChange?.(true);
-      this.registerProbe();
-      this.startHeartbeat();
-      this.syncProjectData();
-    });
+    const url = new URL(baseUrl);
+    const wsOptions: WebSocket.ClientOptions = {};
 
-    this.socket.on('disconnect', (reason) => {
-      logger.warn(`Disconnected: ${reason}`);
-      this.onConnectionChange?.(false);
-      this.stopHeartbeat();
-    });
+    if (this.config.authMode === 'certificate') {
+      // Certificate authentication - send certificate in header
+      // Since nginx terminates TLS, we can't do true mTLS
+      // Instead, we send the certificate in a header for the server to verify
+      url.searchParams.set('client_id', this.config.clientId);
 
-    this.socket.on('error', (error) => {
-      logger.error('WebSocket error:', error);
-    });
+      // Send certificate in header (URL-encoded PEM format)
+      // The server will verify this certificate against its CA
+      wsOptions.headers = {
+        'x-client-cert': encodeURIComponent(this.config.certificate || ''),
+      };
 
-    // Handle incoming commands from server
-    this.socket.on('message', (message: Message) => {
-      this.handleMessage(message);
-    });
+      // Use system CA store for server verification (Let's Encrypt)
+      wsOptions.agent = new https.Agent({
+        rejectUnauthorized: true,
+      });
+
+      logger.debug('Using certificate authentication via header');
+    } else {
+      // Legacy authentication - use client_secret in query params
+      url.searchParams.set('client_id', this.config.clientId);
+      url.searchParams.set('client_secret', this.config.clientSecret || '');
+
+      // If CA certificate is provided, use it to verify server
+      if (this.config.caCertificate) {
+        wsOptions.agent = new https.Agent({
+          ca: this.config.caCertificate,
+          rejectUnauthorized: true,
+        });
+      }
+
+      logger.debug('Using legacy secret authentication');
+    }
+
+    return { wsUrl: url.toString(), wsOptions };
   }
 
   private async handleMessage(message: Message): Promise<void> {
-    logger.debug(`Received: ${message.action}`);
+    logger.debug(`Received: ${message.type}/${message.action}`);
 
+    // Handle events from server (no response needed)
+    if (message.type === 'event') {
+      switch (message.action) {
+        case 'config.sync':
+          // Server sends config like passwordHash on connection
+          this.handleConfigSync(message.payload as { passwordHash?: string });
+          break;
+        default:
+          logger.debug(`Unknown event: ${message.action}`);
+      }
+      return;
+    }
+
+    // Handle requests from server (need response)
     try {
       let response: unknown;
 
@@ -145,17 +213,34 @@ export class WebSocketService {
     }
   }
 
+  /**
+   * Handle config sync event from server.
+   * Updates local config with server-provided values like passwordHash.
+   */
+  private handleConfigSync(payload: { passwordHash?: string }): void {
+    if (payload.passwordHash) {
+      this.config.passwordHash = payload.passwordHash;
+      logger.info('Received passwordHash from server - auth enabled for local UI');
+    } else {
+      // Server has no password set - clear local auth requirement
+      this.config.passwordHash = undefined;
+      logger.info('No passwordHash from server - local UI auth disabled');
+    }
+  }
+
   private async handleSqlExecute(payload: SqlExecutePayload) {
     const startTime = Date.now();
     try {
       const result = await this.sqlService.execute(payload.query, payload.timeout);
       return {
+        columns: result.columns,
         rows: result.rows,
         rowCount: result.rowCount,
         duration: result.duration,
       };
     } catch (error) {
       return {
+        columns: [],
         rows: [],
         rowCount: 0,
         duration: Date.now() - startTime,
@@ -215,7 +300,13 @@ export class WebSocketService {
       payload,
       timestamp: Date.now(),
     };
-    this.socket?.emit('message', response);
+    this.sendMessage(response);
+  }
+
+  private sendMessage(message: Message): void {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(message));
+    }
   }
 
   private registerProbe(): void {
@@ -226,23 +317,35 @@ export class WebSocketService {
       payload: { serverId: this.config.serverId },
       timestamp: Date.now(),
     };
-    this.socket?.emit('message', message);
+    this.sendMessage(message);
   }
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
+    // Send initial heartbeat immediately to sync status
+    this.sendHeartbeat();
+    // Then schedule periodic heartbeats
     this.heartbeatInterval = setInterval(() => {
-      if (this.socket?.connected) {
-        const message: Message = {
-          id: uuidv4(),
-          type: 'event',
-          action: 'probe.heartbeat',
-          payload: { status: 'ok' },
-          timestamp: Date.now(),
-        };
-        this.socket.emit('message', message);
-      }
+      this.sendHeartbeat();
     }, 30000);
+  }
+
+  private sendHeartbeat(): void {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      const message: Message = {
+        id: uuidv4(),
+        type: 'event',
+        action: 'probe.heartbeat',
+        payload: {
+          status: 'ok',
+          sqlConnected: this.sqlService.isConnected(),
+          sqlHost: this.sqlService.getSqlHost(),
+          projectPath: this.config.projectPath || null,
+        },
+        timestamp: Date.now(),
+      };
+      this.sendMessage(message);
+    }
   }
 
   private stopHeartbeat(): void {
@@ -253,10 +356,16 @@ export class WebSocketService {
   }
 
   private async syncProjectData(): Promise<void> {
+    // Skip sync if no project path configured
+    if (!this.config.projectPath) {
+      logger.info('No project path configured - skipping file sync');
+      return;
+    }
+
     try {
       // Sync folder structure
       const structure = await this.fileService.scanProjectStructure();
-      this.socket?.emit('message', {
+      this.sendMessage({
         id: uuidv4(),
         type: 'request',
         action: 'sync.structure',
@@ -266,7 +375,7 @@ export class WebSocketService {
 
       // Sync markdown files
       const mdFiles = await this.fileService.scanMarkdownFiles();
-      this.socket?.emit('message', {
+      this.sendMessage({
         id: uuidv4(),
         type: 'request',
         action: 'sync.mdFiles',
@@ -292,12 +401,21 @@ export class WebSocketService {
 
   disconnect(): void {
     this.stopHeartbeat();
+    this._isConnected = false;
     this.onConnectionChange?.(false);
-    this.socket?.disconnect();
+    this.socket?.close();
     this.socket = null;
   }
 
   isConnected(): boolean {
-    return this.socket?.connected ?? false;
+    return this._isConnected;
+  }
+
+  /**
+   * Force sending a heartbeat to sync status with server.
+   * Call this after SQL config changes or other status updates.
+   */
+  notifyStatusChange(): void {
+    this.sendHeartbeat();
   }
 }

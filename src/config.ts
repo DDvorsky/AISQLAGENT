@@ -17,21 +17,71 @@ function loadInitConfig(): InitConfig | null {
   return null;
 }
 
+/**
+ * Determine authentication mode based on available credentials
+ */
+function determineAuthMode(initConfig: InitConfig | null): 'certificate' | 'secret' | 'none' {
+  if (initConfig?.certificate && initConfig?.privateKey) {
+    return 'certificate';
+  }
+  if (initConfig?.clientSecret) {
+    return 'secret';
+  }
+  return 'none';
+}
+
+/**
+ * Check certificate expiration
+ */
+function checkCertificateExpiration(certExpiresAt: string | undefined): void {
+  if (!certExpiresAt) return;
+
+  const expiresAt = new Date(certExpiresAt);
+  const now = new Date();
+  const daysUntilExpiry = Math.floor((expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (daysUntilExpiry < 0) {
+    console.error(`WARNING: Certificate has EXPIRED on ${expiresAt.toISOString()}`);
+    console.error('Please regenerate the certificate via the AISQLWatch web interface.');
+  } else if (daysUntilExpiry < 30) {
+    console.warn(`WARNING: Certificate expires in ${daysUntilExpiry} days (${expiresAt.toISOString()})`);
+    console.warn('Consider regenerating the certificate soon.');
+  } else if (daysUntilExpiry < 90) {
+    console.info(`Certificate expires in ${daysUntilExpiry} days (${expiresAt.toISOString()})`);
+  }
+}
+
 const initConfig = loadInitConfig();
+const authMode = determineAuthMode(initConfig);
+
+// Check certificate expiration on startup
+if (authMode === 'certificate') {
+  checkCertificateExpiration(initConfig?.certExpiresAt);
+}
 
 export const config: AppConfig = {
   port: parseInt(process.env.PORT || '3000', 10),
-  projectPath: process.env.PROJECT_PATH || '/project',
+  projectPath: process.env.PROJECT_PATH || initConfig?.projectPath || '',
   configPath: CONFIG_PATH,
 
   // From init.json (server-generated)
   serverId: initConfig?.serverId || '',
   clientId: initConfig?.clientId || '',
-  clientSecret: initConfig?.clientSecret || '',
   serverUrl: initConfig?.serverUrl || '',
   keycloakUrl: initConfig?.keycloakUrl || '',
   apiUrl: initConfig?.apiUrl || '',
 
+  // Legacy authentication
+  clientSecret: initConfig?.clientSecret,
+
+  // Certificate authentication (mTLS)
+  certificate: initConfig?.certificate,
+  privateKey: initConfig?.privateKey,
+  caCertificate: initConfig?.caCertificate,
+  certExpiresAt: initConfig?.certExpiresAt,
+
   // Runtime state
-  isConfigured: !!initConfig?.serverUrl,
+  // Configured means we have serverUrl AND valid authentication (secret or certificate)
+  isConfigured: !!initConfig?.serverUrl && authMode !== 'none',
+  authMode,
 };

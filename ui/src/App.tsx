@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ServerConfigCard } from './components/ServerConfigCard';
 import { SqlConfigCard } from './components/SqlConfigCard';
 import { StatusCard } from './components/StatusCard';
-import { AuthCard } from './components/AuthCard';
+import { LoginScreen } from './components/LoginScreen';
 
 interface AppStatus {
   configured: boolean;
@@ -10,7 +10,6 @@ interface AppStatus {
   clientId: string | null;
   sqlConnected: boolean;
   wsConnected: boolean;
-  authenticated: boolean;
 }
 
 interface ServerConfig {
@@ -22,12 +21,27 @@ interface ServerConfig {
   projectPath: string;
 }
 
+interface AuthStatus {
+  requiresAuth: boolean;
+  authenticated: boolean;
+}
+
+// Helper to make authenticated fetch requests
+export const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
+  const token = localStorage.getItem('authToken');
+  const headers = new Headers(options.headers);
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(url, { ...options, headers });
+};
+
 function App() {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus>({ requiresAuth: false, authenticated: false });
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'status' | 'sql' | 'auth'>('status');
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [activeTab, setActiveTab] = useState<'status' | 'sql'>('status');
   const [uploadStatus, setUploadStatus] = useState<{ success?: boolean; message?: string } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [restarting, setRestarting] = useState(false);
@@ -83,19 +97,22 @@ function App() {
 
   const loadInitialData = async () => {
     try {
-      const [statusRes, configRes, authRes] = await Promise.all([
+      // Check auth status first (include token to verify session)
+      const authRes = await fetchWithAuth('/api/auth/status');
+      const authData = await authRes.json();
+      setAuthStatus(authData);
+
+      // Load public data
+      const [statusRes, configRes] = await Promise.all([
         fetch('/api/status'),
         fetch('/api/config'),
-        fetch('/api/auth/status'),
       ]);
 
       const statusData = await statusRes.json();
       const configData = await configRes.json();
-      const authData = await authRes.json();
 
       setStatus(statusData);
       setServerConfig(configData);
-      setIsAuthenticated(authData.authenticated);
     } catch (error) {
       console.error('Failed to load data:', error);
     } finally {
@@ -107,15 +124,21 @@ function App() {
     try {
       const [statusRes, authRes] = await Promise.all([
         fetch('/api/status'),
-        fetch('/api/auth/status'),
+        fetchWithAuth('/api/auth/status'),
       ]);
       const statusData = await statusRes.json();
       const authData = await authRes.json();
       setStatus(statusData);
-      setIsAuthenticated(authData.authenticated);
+      setAuthStatus(authData);
     } catch (error) {
       console.error('Failed to refresh status:', error);
     }
+  };
+
+  const handleLogout = async () => {
+    await fetchWithAuth('/api/auth/logout', { method: 'POST' });
+    localStorage.removeItem('authToken');
+    setAuthStatus({ requiresAuth: true, authenticated: false });
   };
 
   if (loading) {
@@ -139,7 +162,7 @@ function App() {
       const text = await file.text();
       const json = JSON.parse(text);
 
-      const response = await fetch('/api/config/upload', {
+      const response = await fetchWithAuth('/api/config/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(json),
@@ -184,6 +207,17 @@ function App() {
           </p>
         </div>
       </div>
+    );
+  }
+
+  // Check if authentication is required and user is not authenticated
+  if (authStatus.requiresAuth && !authStatus.authenticated) {
+    return (
+      <LoginScreen
+        onLogin={() => {
+          loadInitialData();
+        }}
+      />
     );
   }
 
@@ -250,9 +284,20 @@ function App() {
 
   return (
     <div className="container">
-      <div className="header">
-        <h1>AISQLAGENT</h1>
-        <p>Remote Probe for AISQLWatch</p>
+      <div className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <h1>AISQLAGENT</h1>
+          <p>Remote Probe for AISQLWatch</p>
+        </div>
+        {authStatus.requiresAuth && authStatus.authenticated && (
+          <button
+            className="btn btn-secondary"
+            onClick={handleLogout}
+            style={{ marginTop: '0.5rem' }}
+          >
+            Logout
+          </button>
+        )}
       </div>
 
       <div className="tabs">
@@ -268,19 +313,13 @@ function App() {
         >
           SQL Server
         </button>
-        <button
-          className={`tab ${activeTab === 'auth' ? 'active' : ''}`}
-          onClick={() => setActiveTab('auth')}
-        >
-          Authentication
-        </button>
       </div>
 
       {activeTab === 'status' && (
         <>
           <StatusCard
             status={status}
-            isAuthenticated={isAuthenticated}
+            isAuthenticated={authStatus.authenticated}
           />
           <ServerConfigCard config={serverConfig} />
         </>
@@ -290,16 +329,6 @@ function App() {
         <SqlConfigCard
           onConnectionChange={refreshStatus}
           isConnected={status?.sqlConnected || false}
-        />
-      )}
-
-      {activeTab === 'auth' && (
-        <AuthCard
-          isAuthenticated={isAuthenticated}
-          onAuthChange={() => {
-            refreshStatus();
-            loadInitialData();
-          }}
         />
       )}
     </div>

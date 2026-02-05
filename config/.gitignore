@@ -1,0 +1,8 @@
+# Ignore actual config files (contain secrets)
+init.json
+sql-config.json
+auth-storage.json
+storage.json
+
+# Keep the example
+!init.json.example

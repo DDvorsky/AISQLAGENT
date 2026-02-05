@@ -39,12 +39,12 @@ app.get('*', (req, res) => {
 const sqlService = new SqlService();
 const fileService = new FileService(config.projectPath);
 
-// Initialize routes with services
-initializeRoutes(sqlService);
-
 // WebSocket service with connection status callback
 const wsService = new WebSocketService(config, sqlService, fileService);
 wsService.onConnectionChange = setWsConnected;
+
+// Initialize routes with services (including wsService for status updates)
+initializeRoutes(sqlService, wsService);
 
 // Start server
 async function start() {

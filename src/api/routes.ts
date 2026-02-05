@@ -4,6 +4,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { config } from '../config.js';
 import { SqlService } from '../services/sql.service.js';
+import { WebSocketService } from '../services/websocket.service.js';
 import { SqlConfig } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
@@ -11,11 +12,13 @@ export const apiRouter = Router();
 
 // Shared services - will be injected from main app
 let sqlService: SqlService;
+let wsService: WebSocketService | null = null;
 let wsConnected = false;
 let currentSession: { username: string; token: string } | null = null;
 
-export function initializeRoutes(sql: SqlService) {
+export function initializeRoutes(sql: SqlService, ws?: WebSocketService) {
   sqlService = sql;
+  wsService = ws || null;
 }
 
 export function setWsConnected(connected: boolean) {
@@ -77,9 +80,9 @@ apiRouter.get('/config', (req, res) => {
   });
 });
 
-// ============== SQL ENDPOINTS ==============
+// ============== SQL ENDPOINTS (Protected) ==============
 
-apiRouter.get('/sql/config', async (req, res) => {
+apiRouter.get('/sql/config', authMiddleware, async (req, res) => {
   try {
     const savedConfig = await loadJsonFile<Partial<SqlConfig>>(SQL_CONFIG_PATH, {});
     // Don't return password
@@ -96,7 +99,7 @@ apiRouter.get('/sql/config', async (req, res) => {
   }
 });
 
-apiRouter.post('/sql/configure', async (req, res) => {
+apiRouter.post('/sql/configure', authMiddleware, async (req, res) => {
   try {
     const sqlConfig: SqlConfig = {
       server: req.body.server,
@@ -133,9 +136,13 @@ apiRouter.post('/sql/configure', async (req, res) => {
   }
 });
 
-apiRouter.post('/sql/test', async (req, res) => {
+apiRouter.post('/sql/test', authMiddleware, async (req, res) => {
   try {
     const result = await sqlService.testConnection();
+    // Notify server about SQL status change
+    if (result.success && wsService) {
+      wsService.notifyStatusChange();
+    }
     res.json(result);
   } catch (error) {
     res.json({
@@ -147,101 +154,70 @@ apiRouter.post('/sql/test', async (req, res) => {
 
 // ============== AUTH ENDPOINTS ==============
 
-interface AuthStorage {
-  users: Array<{
-    username: string;
-    passwordHash: string;
-    salt: string;
-    createdAt: string;
-  }>;
+// Session tokens storage (in-memory)
+const sessions = new Map<string, { createdAt: number }>();
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function validateSession(token: string | undefined): boolean {
+  if (!token) return false;
+  const session = sessions.get(token);
+  if (!session) return false;
+  // Check if session is expired
+  if (Date.now() - session.createdAt > SESSION_TTL_MS) {
+    sessions.delete(token);
+    return false;
+  }
+  return true;
 }
 
+function getTokenFromRequest(req: { headers: { authorization?: string } }): string | undefined {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    return authHeader.substring(7);
+  }
+  return undefined;
+}
+
+// Auth status - tells UI if auth is required and if user is authenticated
 apiRouter.get('/auth/status', (req, res) => {
+  const token = getTokenFromRequest(req);
+  const isAuthenticated = validateSession(token);
+  const requiresAuth = !!config.passwordHash;
+
   res.json({
-    authenticated: currentSession !== null,
-    username: currentSession?.username || null,
+    requiresAuth,
+    authenticated: isAuthenticated,
   });
 });
 
-apiRouter.post('/auth/register', async (req, res) => {
+// Login - verify password against hash from init.json
+apiRouter.post('/auth/login', (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { password } = req.body;
 
-    if (!username || !password) {
-      return res.status(400).json({ success: false, error: 'Username and password required' });
+    if (!password) {
+      return res.status(400).json({ success: false, error: 'Password required' });
     }
 
-    if (username.length < 3) {
-      return res.status(400).json({ success: false, error: 'Username must be at least 3 characters' });
+    // Check if auth is configured
+    if (!config.passwordHash) {
+      return res.status(400).json({ success: false, error: 'Authentication not configured' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+    // Hash the input password with SHA256 (same as server)
+    const inputHash = crypto.createHash('sha256').update(password).digest('hex');
+
+    if (inputHash !== config.passwordHash) {
+      logger.warn('Login attempt with invalid password');
+      return res.status(401).json({ success: false, error: 'Invalid password' });
     }
 
-    const storage = await loadJsonFile<AuthStorage>(AUTH_STORAGE_PATH, { users: [] });
-
-    // Check if user exists
-    if (storage.users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
-      return res.status(400).json({ success: false, error: 'Username already exists' });
-    }
-
-    // Create user
-    const salt = crypto.randomBytes(16).toString('hex');
-    const passwordHash = hashPassword(password, salt);
-
-    storage.users.push({
-      username,
-      passwordHash,
-      salt,
-      createdAt: new Date().toISOString(),
-    });
-
-    await saveJsonFile(AUTH_STORAGE_PATH, storage);
-
-    // Auto-login after registration
+    // Create session token
     const token = generateToken();
-    currentSession = { username, token };
+    sessions.set(token, { createdAt: Date.now() });
 
-    logger.info(`User registered: ${username}`);
-    res.json({ success: true, username });
-  } catch (error) {
-    logger.error('Registration failed:', error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Registration failed',
-    });
-  }
-});
-
-apiRouter.post('/auth/login', async (req, res) => {
-  try {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ success: false, error: 'Username and password required' });
-    }
-
-    const storage = await loadJsonFile<AuthStorage>(AUTH_STORAGE_PATH, { users: [] });
-
-    const user = storage.users.find(u => u.username.toLowerCase() === username.toLowerCase());
-
-    if (!user) {
-      return res.status(401).json({ success: false, error: 'Invalid username or password' });
-    }
-
-    const passwordHash = hashPassword(password, user.salt);
-
-    if (passwordHash !== user.passwordHash) {
-      return res.status(401).json({ success: false, error: 'Invalid username or password' });
-    }
-
-    // Create session
-    const token = generateToken();
-    currentSession = { username: user.username, token };
-
-    logger.info(`User logged in: ${username}`);
-    res.json({ success: true, username: user.username });
+    logger.info('User logged in successfully');
+    res.json({ success: true, token });
   } catch (error) {
     logger.error('Login failed:', error);
     res.status(500).json({
@@ -251,25 +227,55 @@ apiRouter.post('/auth/login', async (req, res) => {
   }
 });
 
+// Logout - invalidate session token
 apiRouter.post('/auth/logout', (req, res) => {
-  if (currentSession) {
-    logger.info(`User logged out: ${currentSession.username}`);
+  const token = getTokenFromRequest(req);
+  if (token) {
+    sessions.delete(token);
+    logger.info('User logged out');
   }
-  currentSession = null;
   res.json({ success: true });
 });
 
-// ============== INIT.JSON UPLOAD ==============
+// Auth middleware for protecting routes
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const authMiddleware = (req: any, res: any, next: () => void) => {
+  // Skip auth if no password is configured (agent is open)
+  if (!config.passwordHash) {
+    return next();
+  }
 
-apiRouter.post('/config/upload', async (req, res) => {
+  const token = getTokenFromRequest(req);
+  if (!validateSession(token)) {
+    return res.status(401).json({ error: 'Unauthorized - please login' });
+  }
+
+  next();
+};
+
+// ============== INIT.JSON UPLOAD (Protected) ==============
+
+apiRouter.post('/config/upload', authMiddleware, async (req, res) => {
   try {
     const initJson = req.body;
 
     // Validate required fields
-    if (!initJson.clientId || !initJson.clientSecret || !initJson.serverUrl) {
+    // Must have clientId and serverUrl
+    if (!initJson.clientId || !initJson.serverUrl) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid init.json - missing required fields (clientId, clientSecret, serverUrl)',
+        error: 'Invalid init.json - missing required fields (clientId, serverUrl)',
+      });
+    }
+
+    // Must have either clientSecret (legacy) OR certificate+privateKey (mTLS)
+    const hasSecretAuth = !!initJson.clientSecret;
+    const hasCertAuth = !!initJson.certificate && !!initJson.privateKey;
+
+    if (!hasSecretAuth && !hasCertAuth) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid init.json - missing authentication (requires either clientSecret or certificate+privateKey)',
       });
     }
 
@@ -293,9 +299,50 @@ apiRouter.post('/config/upload', async (req, res) => {
   }
 });
 
+// ============== PROJECT PATH UPDATE ==============
+
+apiRouter.post('/config/project-path', authMiddleware, async (req, res) => {
+  try {
+    const { projectPath } = req.body;
+
+    // Load existing init.json
+    const configPath = path.resolve(process.env.CONFIG_PATH || './config/init.json');
+    let initJson: Record<string, unknown> = {};
+
+    try {
+      const content = await fs.readFile(configPath, 'utf-8');
+      initJson = JSON.parse(content);
+    } catch {
+      return res.status(400).json({
+        success: false,
+        error: 'init.json not found - please upload configuration first',
+      });
+    }
+
+    // Update project path
+    initJson.projectPath = projectPath || '';
+
+    // Save updated config
+    await fs.writeFile(configPath, JSON.stringify(initJson, null, 2));
+
+    logger.info(`Project path updated to: ${projectPath || '(empty)'}`);
+    res.json({
+      success: true,
+      message: 'Project path saved.',
+      needsRestart: true,
+    });
+  } catch (error) {
+    logger.error('Project path update failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Update failed',
+    });
+  }
+});
+
 // ============== RESTART ENDPOINT ==============
 
-apiRouter.post('/restart', (req, res) => {
+apiRouter.post('/restart', authMiddleware, (req, res) => {
   logger.info('Restart requested - shutting down process...');
   res.json({ success: true, message: 'Restarting...' });
 
@@ -306,9 +353,9 @@ apiRouter.post('/restart', (req, res) => {
   }, 500);
 });
 
-// ============== GENERIC STORAGE ==============
+// ============== GENERIC STORAGE (Protected) ==============
 
-apiRouter.get('/storage/:key', async (req, res) => {
+apiRouter.get('/storage/:key', authMiddleware, async (req, res) => {
   const storage = await loadJsonFile<Record<string, unknown>>(
     path.join(CONFIG_DIR, 'storage.json'),
     {}
@@ -316,7 +363,7 @@ apiRouter.get('/storage/:key', async (req, res) => {
   res.json({ value: storage[req.params.key] ?? null });
 });
 
-apiRouter.post('/storage/:key', async (req, res) => {
+apiRouter.post('/storage/:key', authMiddleware, async (req, res) => {
   const storagePath = path.join(CONFIG_DIR, 'storage.json');
   const storage = await loadJsonFile<Record<string, unknown>>(storagePath, {});
   storage[req.params.key] = req.body.value;
@@ -348,6 +395,18 @@ export async function loadSavedSqlConfig(): Promise<void> {
       };
       await sqlService.configure(sqlConfig);
       logger.info('Loaded saved SQL configuration');
+
+      // Test connection to validate config and set connected state
+      const testResult = await sqlService.testConnection();
+      if (testResult.success) {
+        logger.info('SQL connection test successful');
+        // Notify server about SQL status (if ws is connected)
+        if (wsService) {
+          wsService.notifyStatusChange();
+        }
+      } else {
+        logger.warn('SQL connection test failed:', testResult.error);
+      }
     }
   } catch (error) {
     logger.warn('Could not load saved SQL config:', error);

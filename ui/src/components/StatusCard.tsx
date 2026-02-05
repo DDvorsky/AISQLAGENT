@@ -6,13 +6,13 @@ interface StatusCardProps {
     sqlConnected: boolean;
     wsConnected: boolean;
   } | null;
-  isAuthenticated: boolean;
+  isAuthenticated?: boolean;
 }
 
-export function StatusCard({ status, isAuthenticated }: StatusCardProps) {
+export function StatusCard({ status, isAuthenticated = true }: StatusCardProps) {
   const getOverallStatus = () => {
     if (!status) return 'disconnected';
-    if (status.wsConnected && status.sqlConnected && isAuthenticated) return 'connected';
+    if (status.wsConnected && status.sqlConnected) return 'connected';
     if (status.configured) return 'pending';
     return 'disconnected';
   };
@@ -38,11 +38,6 @@ export function StatusCard({ status, isAuthenticated }: StatusCardProps) {
           label="SQL Server"
           connected={status?.sqlConnected || false}
           detail={status?.sqlConnected ? 'Connected' : 'Not connected'}
-        />
-        <StatusRow
-          label="User Authentication"
-          connected={isAuthenticated}
-          detail={isAuthenticated ? 'Authenticated' : 'Not authenticated'}
         />
       </div>
     </div>
