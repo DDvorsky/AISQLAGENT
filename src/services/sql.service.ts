@@ -1,38 +1,51 @@
-import sql from 'mssql';
-import { SqlConfig } from '../types/index.js';
+import { SqlConfig, DbType } from '../types/index.js';
+import { IDbDriver, DbQueryResult } from './drivers/db-driver.interface.js';
+import { MssqlDriver } from './drivers/mssql.driver.js';
+import { PostgresDriver } from './drivers/postgres.driver.js';
 import { logger } from '../utils/logger.js';
 
 export class SqlService {
-  private pool: sql.ConnectionPool | null = null;
+  private driver: IDbDriver | null = null;
   private config: SqlConfig | null = null;
-  private _lastTestSuccess = false;  // Track if last connection test was successful
+  private _lastTestSuccess = false;
 
   async configure(config: SqlConfig): Promise<void> {
+    if (!config.dbType) {
+      config.dbType = 'mssql';
+    }
+
+    const dbTypeChanged = this.config?.dbType !== config.dbType;
     this.config = config;
-    this._lastTestSuccess = false;  // Reset on reconfigure
+    this._lastTestSuccess = false;
+
     await this.disconnect();
+
+    if (dbTypeChanged || !this.driver) {
+      this.driver = this.createDriver(config.dbType);
+    }
+  }
+
+  private createDriver(dbType: DbType): IDbDriver {
+    switch (dbType) {
+      case 'mssql':
+        return new MssqlDriver();
+      case 'postgres':
+        return new PostgresDriver();
+      default:
+        throw new Error(`Unsupported database type: ${dbType}`);
+    }
   }
 
   async connect(): Promise<boolean> {
     if (!this.config) {
       throw new Error('SQL not configured');
     }
+    if (!this.driver) {
+      this.driver = this.createDriver(this.config.dbType || 'mssql');
+    }
 
     try {
-      this.pool = await sql.connect({
-        server: this.config.server,
-        port: this.config.port,
-        user: this.config.user,
-        password: this.config.password,
-        database: this.config.database,
-        options: {
-          encrypt: this.config.options?.encrypt ?? true,
-          trustServerCertificate: this.config.options?.trustServerCertificate ?? true,
-        },
-        connectionTimeout: 15000,
-        requestTimeout: 30000,
-      });
-      logger.info('Connected to SQL Server');
+      await this.driver.connect(this.config);
       return true;
     } catch (error) {
       logger.error('SQL connection failed:', error);
@@ -41,10 +54,8 @@ export class SqlService {
   }
 
   async disconnect(): Promise<void> {
-    if (this.pool) {
-      await this.pool.close();
-      this.pool = null;
-      logger.info('Disconnected from SQL Server');
+    if (this.driver) {
+      await this.driver.disconnect();
     }
   }
 
@@ -67,42 +78,14 @@ export class SqlService {
   async execute(
     query: string,
     timeout?: number
-  ): Promise<{ rows: unknown[]; rowCount: number; duration: number; columns: string[] }> {
-    if (!this.pool) {
+  ): Promise<DbQueryResult> {
+    if (!this.driver || !this.driver.isConnected()) {
       await this.connect();
     }
 
     const startTime = Date.now();
-
     try {
-      const request = this.pool!.request();
-      // Set query timeout via the request's internal timeout property
-      if (timeout) {
-        (request as unknown as { _timeout: number })._timeout = timeout;
-      }
-
-      const result = await request.query(query);
-      const duration = Date.now() - startTime;
-
-      // Extract column names from first row or empty array
-      const columns = result.recordset && result.recordset.length > 0
-        ? Object.keys(result.recordset[0])
-        : [];
-
-      // Convert rows from objects to arrays (matching column order)
-      const rows = (result.recordset || []).map((row: Record<string, unknown>) =>
-        columns.map(col => row[col])
-      );
-
-      // Important: We do NOT log the query (know-how protection)
-      logger.debug(`Query executed in ${duration}ms, returned ${result.recordset?.length || 0} rows`);
-
-      return {
-        columns,
-        rows,
-        rowCount: result.recordset?.length || 0,
-        duration,
-      };
+      return await this.driver!.execute(query, timeout);
     } catch (error) {
       const duration = Date.now() - startTime;
       logger.error(`Query failed after ${duration}ms:`, error);
@@ -111,9 +94,7 @@ export class SqlService {
   }
 
   isConnected(): boolean {
-    // Return true if pool is connected OR if last test was successful
-    // (pool might disconnect due to idle timeout, but config is still valid)
-    return (this.pool?.connected ?? false) || this._lastTestSuccess;
+    return (this.driver?.isConnected() ?? false) || this._lastTestSuccess;
   }
 
   getSqlHost(): string | null {
@@ -122,5 +103,9 @@ export class SqlService {
 
   isConfigured(): boolean {
     return this.config !== null;
+  }
+
+  getDbType(): DbType | null {
+    return this.config?.dbType ?? null;
   }
 }

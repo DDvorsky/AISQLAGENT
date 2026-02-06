@@ -250,7 +250,11 @@ export class WebSocketService {
           response = await this.handleFileSearch(message.payload as FileSearchPayload);
           break;
         case 'file.getStructure':
-          response = await this.fileService.scanProjectStructure();
+          if (!this.config.projectPath) {
+            response = { error: 'Project path not configured on agent' };
+          } else {
+            response = await this.fileService.scanProjectStructure();
+          }
           break;
         default:
           response = { error: `Unknown action: ${message.action}` };
@@ -457,6 +461,16 @@ export class WebSocketService {
   }
 
   private async handleFileRead(payload: FileReadPayload) {
+    // Check if project path is configured
+    if (!this.config.projectPath) {
+      return {
+        path: payload.path,
+        content: '',
+        size: 0,
+        error: 'Project path not configured on agent',
+      };
+    }
+
     try {
       const result = await this.fileService.readFile(payload.path);
       return {
@@ -475,6 +489,15 @@ export class WebSocketService {
   }
 
   private async handleFileList(payload: FileListPayload) {
+    // Check if project path is configured
+    if (!this.config.projectPath) {
+      return {
+        path: payload.path,
+        files: [],
+        error: 'Project path not configured on agent',
+      };
+    }
+
     try {
       const files = await this.fileService.listFiles(payload.path, payload.recursive);
       return { path: payload.path, files };
@@ -488,6 +511,14 @@ export class WebSocketService {
   }
 
   private async handleFileSearch(payload: FileSearchPayload) {
+    // Check if project path is configured
+    if (!this.config.projectPath) {
+      return {
+        results: [],
+        error: 'Project path not configured on agent',
+      };
+    }
+
     try {
       const results = await this.fileService.searchInFiles(payload.pattern, payload.glob);
       return { results };
@@ -547,6 +578,7 @@ export class WebSocketService {
           status: 'ok',
           sqlConnected: this.sqlService.isConnected(),
           sqlHost: this.sqlService.getSqlHost(),
+          dbType: this.sqlService.getDbType(),
           projectPath: this.config.projectPath || null,
         },
         timestamp: Date.now(),

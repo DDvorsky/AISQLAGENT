@@ -5,7 +5,7 @@ import path from 'path';
 import { config } from '../config.js';
 import { SqlService } from '../services/sql.service.js';
 import { WebSocketService } from '../services/websocket.service.js';
-import { SqlConfig } from '../types/index.js';
+import { SqlConfig, DbType } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 
 export const apiRouter = Router();
@@ -103,15 +103,19 @@ const authMiddleware = (req: any, res: any, next: () => void) => {
 
 apiRouter.get('/sql/config', authMiddleware, async (req, res) => {
   try {
-    const savedConfig = await loadJsonFile<Partial<SqlConfig>>(SQL_CONFIG_PATH, {});
+    const savedConfig = await loadJsonFile<Partial<SqlConfig> & { _encPassword?: string }>(SQL_CONFIG_PATH, {});
+    const dbType = savedConfig.dbType || 'mssql';
+    const defaultPort = dbType === 'postgres' ? 5432 : 1433;
     // Don't return password
     res.json({
+      dbType,
       server: savedConfig.server || '',
-      port: savedConfig.port || 1433,
+      port: savedConfig.port || defaultPort,
       user: savedConfig.user || '',
       database: savedConfig.database || '',
       encrypt: savedConfig.options?.encrypt ?? true,
       trustServerCertificate: savedConfig.options?.trustServerCertificate ?? true,
+      sslMode: savedConfig.options?.sslMode || 'disable',
     });
   } catch (error) {
     res.json({});
@@ -120,31 +124,37 @@ apiRouter.get('/sql/config', authMiddleware, async (req, res) => {
 
 apiRouter.post('/sql/configure', authMiddleware, async (req, res) => {
   try {
+    const dbType = (req.body.dbType || 'mssql') as DbType;
+    const defaultPort = dbType === 'postgres' ? 5432 : 1433;
+
     const sqlConfig: SqlConfig = {
+      dbType,
       server: req.body.server,
-      port: parseInt(req.body.port, 10) || 1433,
+      port: parseInt(req.body.port, 10) || defaultPort,
       user: req.body.user,
       password: req.body.password,
       database: req.body.database,
-      options: {
-        encrypt: req.body.encrypt ?? true,
-        trustServerCertificate: req.body.trustServerCertificate ?? true,
-      },
+      options: dbType === 'postgres'
+        ? { sslMode: req.body.sslMode || 'disable' }
+        : {
+            encrypt: req.body.encrypt ?? true,
+            trustServerCertificate: req.body.trustServerCertificate ?? true,
+          },
     };
 
     // Save config (without password in plain text for security)
     await saveJsonFile(SQL_CONFIG_PATH, {
+      dbType: sqlConfig.dbType,
       server: sqlConfig.server,
       port: sqlConfig.port,
       user: sqlConfig.user,
       database: sqlConfig.database,
       options: sqlConfig.options,
-      // Password is encrypted or stored securely - for now we keep it for functionality
       _encPassword: Buffer.from(sqlConfig.password).toString('base64'),
     });
 
     await sqlService.configure(sqlConfig);
-    logger.info('SQL configuration saved');
+    logger.info(`SQL configuration saved (${dbType})`);
     res.json({ success: true });
   } catch (error) {
     logger.error('SQL configuration failed:', error);
@@ -384,25 +394,30 @@ apiRouter.post('/storage/:key', authMiddleware, async (req, res) => {
 export async function loadSavedSqlConfig(): Promise<void> {
   try {
     const saved = await loadJsonFile<{
+      dbType?: string;
       server?: string;
       port?: number;
       user?: string;
       database?: string;
-      options?: { encrypt?: boolean; trustServerCertificate?: boolean };
+      options?: { encrypt?: boolean; trustServerCertificate?: boolean; sslMode?: string };
       _encPassword?: string;
     }>(SQL_CONFIG_PATH, {});
 
     if (saved.server && saved.user && saved._encPassword) {
+      const dbType = (saved.dbType || 'mssql') as DbType;
+      const defaultPort = dbType === 'postgres' ? 5432 : 1433;
+
       const sqlConfig: SqlConfig = {
+        dbType,
         server: saved.server,
-        port: saved.port || 1433,
+        port: saved.port || defaultPort,
         user: saved.user,
         password: Buffer.from(saved._encPassword, 'base64').toString('utf-8'),
         database: saved.database,
-        options: saved.options,
+        options: saved.options as SqlConfig['options'],
       };
       await sqlService.configure(sqlConfig);
-      logger.info('Loaded saved SQL configuration');
+      logger.info(`Loaded saved SQL configuration (${dbType})`);
 
       // Test connection to validate config and set connected state
       const testResult = await sqlService.testConnection();

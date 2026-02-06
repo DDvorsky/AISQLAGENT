@@ -6,7 +6,10 @@ interface SqlConfigCardProps {
   isConnected: boolean;
 }
 
+type DbType = 'mssql' | 'postgres';
+
 interface SqlConfig {
+  dbType: DbType;
   server: string;
   port: string;
   user: string;
@@ -14,10 +17,12 @@ interface SqlConfig {
   database: string;
   encrypt: boolean;
   trustServerCertificate: boolean;
+  sslMode: string;
 }
 
 export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCardProps) {
   const [config, setConfig] = useState<SqlConfig>({
+    dbType: 'mssql',
     server: '',
     port: '1433',
     user: '',
@@ -25,6 +30,7 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
     database: '',
     encrypt: true,
     trustServerCertificate: true,
+    sslMode: 'disable',
   });
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -41,14 +47,18 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
       if (res.ok) {
         const data = await res.json();
         if (data.server) {
+          const dbType = data.dbType || 'mssql';
+          const defaultPort = dbType === 'postgres' ? '5432' : '1433';
           setConfig({
+            dbType,
             server: data.server || '',
-            port: data.port?.toString() || '1433',
+            port: data.port?.toString() || defaultPort,
             user: data.user || '',
             password: '', // Don't load password for security
             database: data.database || '',
             encrypt: data.encrypt ?? true,
             trustServerCertificate: data.trustServerCertificate ?? true,
+            sslMode: data.sslMode || 'disable',
           });
         }
       }
@@ -59,6 +69,17 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
 
   const handleChange = (field: keyof SqlConfig, value: string | boolean) => {
     setConfig(prev => ({ ...prev, [field]: value }));
+    setTestResult(null);
+    setSaveResult(null);
+  };
+
+  const handleDbTypeChange = (newDbType: DbType) => {
+    const defaultPort = newDbType === 'postgres' ? '5432' : '1433';
+    setConfig(prev => ({
+      ...prev,
+      dbType: newDbType,
+      port: defaultPort,
+    }));
     setTestResult(null);
     setSaveResult(null);
   };
@@ -118,10 +139,14 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
     }
   };
 
+  const isPostgres = config.dbType === 'postgres';
+
   return (
     <div className="card">
       <div className="card-header">
-        <h2 className="card-title">SQL Server Configuration</h2>
+        <h2 className="card-title">
+          {isPostgres ? 'PostgreSQL' : 'SQL Server'} Configuration
+        </h2>
         <span className={`status-badge status-${isConnected ? 'connected' : 'disconnected'}`}>
           {isConnected ? 'Connected' : 'Disconnected'}
         </span>
@@ -139,6 +164,18 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
         </div>
       )}
 
+      <div className="form-group">
+        <label className="form-label">Database Type</label>
+        <select
+          className="form-input"
+          value={config.dbType}
+          onChange={(e) => handleDbTypeChange(e.target.value as DbType)}
+        >
+          <option value="mssql">SQL Server</option>
+          <option value="postgres">PostgreSQL</option>
+        </select>
+      </div>
+
       <div className="form-row">
         <div className="form-group">
           <label className="form-label">Server Host</label>
@@ -155,7 +192,7 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
           <input
             type="text"
             className="form-input"
-            placeholder="1433"
+            placeholder={isPostgres ? '5432' : '1433'}
             value={config.port}
             onChange={(e) => handleChange('port', e.target.value)}
           />
@@ -168,7 +205,7 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
           <input
             type="text"
             className="form-input"
-            placeholder="sa"
+            placeholder={isPostgres ? 'postgres' : 'sa'}
             value={config.user}
             onChange={(e) => handleChange('user', e.target.value)}
           />
@@ -190,30 +227,46 @@ export function SqlConfigCard({ onConnectionChange, isConnected }: SqlConfigCard
         <input
           type="text"
           className="form-input"
-          placeholder="master"
+          placeholder={isPostgres ? 'postgres' : 'master'}
           value={config.database}
           onChange={(e) => handleChange('database', e.target.value)}
         />
       </div>
 
-      <div className="form-row" style={{ marginTop: '1rem' }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={config.encrypt}
-            onChange={(e) => handleChange('encrypt', e.target.checked)}
-          />
-          <span style={{ fontSize: '0.875rem' }}>Encrypt connection</span>
-        </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={config.trustServerCertificate}
-            onChange={(e) => handleChange('trustServerCertificate', e.target.checked)}
-          />
-          <span style={{ fontSize: '0.875rem' }}>Trust server certificate</span>
-        </label>
-      </div>
+      {isPostgres ? (
+        <div className="form-group" style={{ marginTop: '1rem' }}>
+          <label className="form-label">SSL Mode</label>
+          <select
+            className="form-input"
+            value={config.sslMode}
+            onChange={(e) => handleChange('sslMode', e.target.value)}
+          >
+            <option value="disable">Disable</option>
+            <option value="require">Require</option>
+            <option value="verify-ca">Verify CA</option>
+            <option value="verify-full">Verify Full</option>
+          </select>
+        </div>
+      ) : (
+        <div className="form-row" style={{ marginTop: '1rem' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={config.encrypt}
+              onChange={(e) => handleChange('encrypt', e.target.checked)}
+            />
+            <span style={{ fontSize: '0.875rem' }}>Encrypt connection</span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={config.trustServerCertificate}
+              onChange={(e) => handleChange('trustServerCertificate', e.target.checked)}
+            />
+            <span style={{ fontSize: '0.875rem' }}>Trust server certificate</span>
+          </label>
+        </div>
+      )}
 
       <div className="btn-group">
         <button

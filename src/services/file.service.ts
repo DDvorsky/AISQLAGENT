@@ -191,8 +191,23 @@ export class FileService {
 
   private matchGlob(filename: string, glob: string): boolean {
     if (glob === '*') return true;
-    const pattern = glob.replace(/\*/g, '.*').replace(/\?/g, '.');
-    return new RegExp(`^${pattern}$`, 'i').test(filename);
+
+    // Handle comma-separated patterns like "*.sql,*.cs,*.py,*.ts"
+    const patterns = glob.split(',').map(p => p.trim());
+
+    for (const pattern of patterns) {
+      // Convert glob to regex: escape dots, replace * with .*
+      const regex = pattern
+        .replace(/\./g, '\\.')  // Escape dots
+        .replace(/\*/g, '.*')   // * becomes .*
+        .replace(/\?/g, '.');   // ? becomes .
+
+      if (new RegExp(`^${regex}$`, 'i').test(filename)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**

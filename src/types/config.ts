@@ -30,14 +30,20 @@ export interface AppConfig extends InitConfig {
   authRequired: boolean;
 }
 
+export type DbType = 'mssql' | 'postgres';
+
 export interface SqlConfig {
+  dbType?: DbType;
   server: string;
   port: number;
   user: string;
   password: string;
   database?: string;
   options?: {
+    // MSSQL options
     encrypt?: boolean;
     trustServerCertificate?: boolean;
+    // PostgreSQL options
+    sslMode?: 'disable' | 'require' | 'verify-ca' | 'verify-full';
   };
 }
