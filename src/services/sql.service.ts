@@ -14,15 +14,24 @@ export class SqlService {
       config.dbType = 'mssql';
     }
 
-    const dbTypeChanged = this.config?.dbType !== config.dbType;
+    // Skip disconnect if connection params haven't changed and driver is alive
+    const connectionChanged = !this.config
+      || this.config.dbType !== config.dbType
+      || this.config.server !== config.server
+      || this.config.port !== config.port
+      || this.config.user !== config.user
+      || this.config.password !== config.password
+      || this.config.database !== config.database;
+
     this.config = config;
-    this._lastTestSuccess = false;
 
-    await this.disconnect();
-
-    if (dbTypeChanged || !this.driver) {
-      this.driver = this.createDriver(config.dbType);
+    if (!connectionChanged && this.driver) {
+      return;
     }
+
+    this._lastTestSuccess = false;
+    await this.disconnect();
+    this.driver = this.createDriver(config.dbType);
   }
 
   private createDriver(dbType: DbType): IDbDriver {
