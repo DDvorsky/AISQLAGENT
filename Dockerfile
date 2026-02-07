@@ -37,9 +37,9 @@ COPY --from=builder /app/dist ./dist
 # Copy built UI
 COPY --from=builder /app/ui/dist ./ui/dist
 
-# Copy entrypoint
+# Copy entrypoint (sed strips Windows CRLF line endings)
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Non-root user for security (entrypoint runs as root for mount, then drops to nodejs)
 RUN addgroup -g 1001 -S nodejs && \
