@@ -24,6 +24,9 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Install cifs-utils for mounting network shares + su-exec for privilege drop
+RUN apk add --no-cache cifs-utils su-exec
+
 # Install production dependencies only
 COPY package*.json ./
 RUN npm ci --production
@@ -34,14 +37,16 @@ COPY --from=builder /app/dist ./dist
 # Copy built UI
 COPY --from=builder /app/ui/dist ./ui/dist
 
-# Non-root user for security
+# Copy entrypoint
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Non-root user for security (entrypoint runs as root for mount, then drops to nodejs)
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 -G nodejs
 
 # Create config directory with correct ownership
 RUN mkdir -p /app/config && chown -R nodejs:nodejs /app/config
-
-USER nodejs
 
 EXPOSE 3000
 
@@ -50,4 +55,5 @@ ENV PORT=3000
 ENV CONFIG_PATH=/app/config/init.json
 ENV PROJECT_PATH=/project
 
-CMD ["node", "dist/index.js"]
+# Entrypoint handles CIFS mount then drops to nodejs user
+ENTRYPOINT ["/entrypoint.sh"]

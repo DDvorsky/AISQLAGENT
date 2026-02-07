@@ -77,9 +77,29 @@ if (authMode === 'certificate') {
   checkCertificateExpiration(initConfig?.certExpiresAt);
 }
 
+/**
+ * Resolve project path for file scanning.
+ * UNC paths (\\server\share or //server/share) are auto-mounted to /project
+ * by entrypoint.sh, so we resolve them to the mount point.
+ */
+function resolveProjectPath(): string {
+  const envPath = process.env.PROJECT_PATH;
+  const configPath = initConfig?.projectPath || '';
+
+  // Env var always takes priority
+  if (envPath) return envPath;
+
+  // UNC paths are mounted to /project by entrypoint.sh
+  if (configPath.startsWith('\\\\') || configPath.startsWith('//')) {
+    return '/project';
+  }
+
+  return configPath;
+}
+
 export const config: AppConfig = {
   port: parseInt(process.env.PORT || '3000', 10),
-  projectPath: process.env.PROJECT_PATH || initConfig?.projectPath || '',
+  projectPath: resolveProjectPath(),
   configPath: CONFIG_PATH,
 
   // From init.json (server-generated)

@@ -17,8 +17,21 @@ REM Ask for port
 set /p PORT="Enter port for agent UI [default: 3333]: "
 if "%PORT%"=="" set PORT=3333
 
+REM Ask for UNC project path (optional)
+echo.
+set /p UNC_PATH="Enter UNC project path (optional, e.g. \\server\share\path): "
+set CIFS_USER=
+set CIFS_PASS=
+set CIFS_DOMAIN=
+if not "%UNC_PATH%"=="" (
+    set /p CIFS_USER="  SMB Username: "
+    set /p CIFS_PASS="  SMB Password: "
+    set /p CIFS_DOMAIN="  SMB Domain [optional]: "
+)
+
 echo.
 echo Using port: %PORT%
+if not "%UNC_PATH%"=="" echo Project path: %UNC_PATH%
 echo.
 
 REM Check Docker
@@ -66,7 +79,14 @@ docker rm -f aisqlagent >nul 2>&1
 
 REM Run
 echo [5/5] Starting container on port %PORT%...
-docker run -d --name aisqlagent --restart unless-stopped -p %PORT%:3000 --add-host host.docker.internal:host-gateway %IMAGE_NAME%
+set DOCKER_OPTS=-d --name aisqlagent --restart unless-stopped -p %PORT%:3000 --add-host host.docker.internal:host-gateway
+if not "%CIFS_USER%"=="" (
+    set DOCKER_OPTS=%DOCKER_OPTS% --cap-add SYS_ADMIN -e CIFS_USER=%CIFS_USER% -e CIFS_PASS=%CIFS_PASS%
+)
+if not "%CIFS_DOMAIN%"=="" (
+    set DOCKER_OPTS=%DOCKER_OPTS% -e CIFS_DOMAIN=%CIFS_DOMAIN%
+)
+docker run %DOCKER_OPTS% %IMAGE_NAME%
 if errorlevel 1 (
     echo.
     echo       ERROR: Failed to start container!
