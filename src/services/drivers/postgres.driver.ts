@@ -43,30 +43,48 @@ export class PostgresDriver implements IDbDriver {
 
     const startTime = Date.now();
 
-    let text = query;
-    if (timeout) {
-      text = `SET LOCAL statement_timeout = ${timeout}; ${query}`;
+    // Use a dedicated client for per-query timeout support.
+    // SET LOCAL requires an explicit transaction to take effect.
+    // Avoids multi-statement queries which can return wrong result set.
+    const client = await this.pool.connect();
+    try {
+      if (timeout) {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL statement_timeout = '${timeout}ms'`);
+      }
+
+      const result = await client.query(query);
+
+      if (timeout) {
+        await client.query('COMMIT');
+      }
+
+      const duration = Date.now() - startTime;
+
+      const columns = result.fields
+        ? result.fields.map(f => f.name)
+        : [];
+
+      const rows = (result.rows || []).map((row: Record<string, unknown>) =>
+        columns.map(col => row[col])
+      );
+
+      logger.debug(`Query executed in ${duration}ms, returned ${result.rowCount ?? 0} rows`);
+
+      return {
+        columns,
+        rows,
+        rowCount: result.rowCount ?? 0,
+        duration,
+      };
+    } catch (error) {
+      if (timeout) {
+        try { await client.query('ROLLBACK'); } catch { /* ignore rollback errors */ }
+      }
+      throw error;
+    } finally {
+      client.release();
     }
-
-    const result = await this.pool.query(text);
-    const duration = Date.now() - startTime;
-
-    const columns = result.fields
-      ? result.fields.map(f => f.name)
-      : [];
-
-    const rows = (result.rows || []).map((row: Record<string, unknown>) =>
-      columns.map(col => row[col])
-    );
-
-    logger.debug(`Query executed in ${duration}ms, returned ${result.rowCount ?? 0} rows`);
-
-    return {
-      columns,
-      rows,
-      rowCount: result.rowCount ?? 0,
-      duration,
-    };
   }
 
   isConnected(): boolean {

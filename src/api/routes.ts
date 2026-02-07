@@ -127,12 +127,28 @@ apiRouter.post('/sql/configure', authMiddleware, async (req, res) => {
     const dbType = (req.body.dbType || 'mssql') as DbType;
     const defaultPort = dbType === 'postgres' ? 5432 : 1433;
 
+    // If no password provided, keep existing saved password
+    let password = req.body.password;
+    let encPassword: string | undefined;
+
+    if (!password) {
+      const existingConfig = await loadJsonFile<{ _encPassword?: string }>(SQL_CONFIG_PATH, {});
+      if (existingConfig._encPassword) {
+        password = Buffer.from(existingConfig._encPassword, 'base64').toString('utf-8');
+        encPassword = existingConfig._encPassword;
+      }
+    }
+
+    if (!encPassword) {
+      encPassword = password ? Buffer.from(password).toString('base64') : '';
+    }
+
     const sqlConfig: SqlConfig = {
       dbType,
       server: req.body.server,
       port: parseInt(req.body.port, 10) || defaultPort,
       user: req.body.user,
-      password: req.body.password,
+      password,
       database: req.body.database,
       options: dbType === 'postgres'
         ? { sslMode: req.body.sslMode || 'disable' }
@@ -150,7 +166,7 @@ apiRouter.post('/sql/configure', authMiddleware, async (req, res) => {
       user: sqlConfig.user,
       database: sqlConfig.database,
       options: sqlConfig.options,
-      _encPassword: Buffer.from(sqlConfig.password).toString('base64'),
+      _encPassword: encPassword,
     });
 
     await sqlService.configure(sqlConfig);
